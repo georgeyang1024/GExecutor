@@ -1,0 +1,2 @@
+# GExecutor
+基于mybaits和redis，封装成以Redis优先Mapper次之的增删改查操作，通过注解给实体自动解析数据，完美适用于api接口数据生成，实体数据处理工具。
