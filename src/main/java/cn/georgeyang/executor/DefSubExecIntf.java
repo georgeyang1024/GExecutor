@@ -8,6 +8,7 @@ import org.springframework.web.context.WebApplicationContext;
 public class DefSubExecIntf implements SubExecIntf<Object,Object,Object> {
     protected WebApplicationContext webApplicationContext;
     protected GExecutorService GExecutorService;
+    private boolean isLifeCycleDoing;
 
     @Override
     public void init(WebApplicationContext context, GExecutorService service) {
@@ -22,17 +23,19 @@ public class DefSubExecIntf implements SubExecIntf<Object,Object,Object> {
 
     @Override
     public Object onSubSelect(ExecuteContext executeContext, Class<Object> returnType, Object param, Object attachParam) throws Exception {
+        isLifeCycleDoing = true;
         return GExecutorService.fetch(executeContext,returnType,param);
     }
 
     @Override
     public Object onSubSelectMore(ExecuteContext executeContext, Class<Object> returnType, Object[] param, Object attachParam) throws Exception {
+        isLifeCycleDoing = true;
         return null;
     }
 
     @Override
     public void finishSelect(ExecuteContext executeContext, ExecutableField executableField, Object tag, Object result) {
-
+        isLifeCycleDoing = false;
     }
 
     @Override
@@ -43,5 +46,10 @@ public class DefSubExecIntf implements SubExecIntf<Object,Object,Object> {
     @Override
     public void onParentDelete(Object parent) throws Exception {
 
+    }
+
+    @Override
+    public boolean isLifeCycleFinish() {
+        return !isLifeCycleDoing;
     }
 }

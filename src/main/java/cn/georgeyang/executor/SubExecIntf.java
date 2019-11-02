@@ -10,13 +10,16 @@ public interface SubExecIntf<P,IN,OUT> {
     void init(WebApplicationContext context, GExecutorService service);
 
     //准备开始查找数据，返回true拦截(跳过)查找
-    boolean preStartSelect(ExecuteContext executeContext,ExecutableField executableField,Object tag) throws Exception;
+    boolean preStartSelect(ExecuteContext executeContext, ExecutableField executableField, Object tag) throws Exception;
 
     OUT onSubSelect(ExecuteContext executeContext,Class<OUT> returnType,IN param,Object attachParam) throws Exception;
     OUT onSubSelectMore(ExecuteContext executeContext,Class<OUT> returnType,Object[] param,Object attachParam) throws Exception;
 
     //一次执行完成
     void finishSelect(ExecuteContext executeContext,ExecutableField executableField,Object tag,OUT result);
+
+    //执行一次的生命周期是否结束，如果没有结束，将使用新的实例执行新的生命周期
+    boolean isLifeCycleFinish();
 
     void onParentUpdate(P parent) throws Exception;
     void onParentDelete(P parent) throws Exception;

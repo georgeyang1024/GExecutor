@@ -13,7 +13,7 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
 @Retention(RUNTIME)
 @Target(FIELD)
 public @interface ExecutableField {
-    String bindFieldName() default  "id";//和那个当前类的字段关联对应？（用它的id查询详细内容，用于管理查询）
+    String bindFieldName() default  "id";//和那个当前类的字段关联对应？（用它的id查询详细内容，用于管理查询）,如果空字符串，表示整个实体传进去
     String[] bindFieldList() default {};//多个关联字段查询时，用到
     boolean isIdField() default false;//指定这个字段是id(主键索引字段)，过滤查询该字段的内容
     Class<? extends SubExecIntf> executeImpl() default DefSubExecIntf.class;//自定义的执行方法实现

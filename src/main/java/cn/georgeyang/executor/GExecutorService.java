@@ -1,8 +1,9 @@
 package cn.georgeyang.executor;
 
-import cn.georgeyang.redis.RedisService;
 import cn.georgeyang.utils.Utils;
 import com.alibaba.fastjson.JSON;
+import com.sun.istack.internal.NotNull;
+import com.sun.istack.internal.Nullable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.context.ContextLoader;
@@ -24,10 +25,17 @@ import java.util.concurrent.*;
  */
 public class GExecutorService {
     @Autowired
-    private RedisService redisService;
+    private RedisTemplate redisTemplate;
 
-    private RedisTemplate<String, String> getRedisTemplate() {
-        return redisService.getRedisTemplate();
+    private static int MAX_CACHE_SAVE_MINUTE = 60 * 24 * 31;//缓存最多保留31天(分钟单位)
+
+    public void setRedisTemplate(RedisTemplate<String, String> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
+
+
+    public RedisTemplate<String, String> getRedisTemplate() {
+        return redisTemplate;
     }
 
     private void getAllClassField(List<Field> fieldList, Class clz, Class... withAnnotationFiled) {
@@ -87,24 +95,41 @@ public class GExecutorService {
     }
 
     public <T, O> List<T> tranToList(ExecuteContext executeContext, Class<T> clz, List<O> dataList) throws Exception {
+        return tranToList(executeContext, clz, dataList, null);
+    }
+
+    public <T, O> List<T> tranToList(ExecuteContext executeContext, Class<T> clz, List<O> dataList, Object attachParam) throws Exception {
         if (Utils.isEmpty(dataList))
             return Collections.emptyList();
         List<T> retList = new ArrayList<>(dataList.size());
 
-        //TODO 換成綫程池
-//        ExecutorService executorService = getExecutorService(dataList.size());
-//        List<Future<T>> futureList = new LinkedList<>();
-        for (O t : dataList) {
-            retList.add(fetchFrom(executeContext, t, clz));
+        //量小同步
+        if (dataList.size() <= 2) {
+            for (O t : dataList) {
+                retList.add(tranTo(executeContext, t, clz, attachParam));
+            }
+            return retList;
         }
+        //量大线程池处理
+        ExecutorService executorService = getExecutorService(dataList.size());
+        List<Future<T>> futureList = new LinkedList<>();
+        for (O bean : dataList) {
+            ThreadTranCallable callable = new ThreadTranCallable(this, executeContext, clz, bean, attachParam);
+            Future<T> ret = executorService.submit(callable);
+            futureList.add(ret);
+        }
+        for (Future<T> future : futureList) {
+            retList.add(future.get());
+        }
+        executorService.shutdown();
         return retList;
     }
 
 
-    private java.util.concurrent.ExecutorService getExecutorService(Integer dataSize) {
+    private ExecutorService getExecutorService(Integer dataSize) {
         int threadSize = dataSize;
         threadSize = threadSize >= 8 ? 8 : threadSize;
-        java.util.concurrent.ExecutorService executorService = Executors.newFixedThreadPool(threadSize);
+        ExecutorService executorService = Executors.newFixedThreadPool(threadSize);
         return executorService;
     }
 
@@ -116,13 +141,14 @@ public class GExecutorService {
         if (Utils.isEmpty(ids))
             return Collections.emptyList();
         List<T> retList = new ArrayList<>(ids.size());
-        if (ids.size() == 1) {
+        //量小同步处理
+        if (ids.size() <= 2) {
             T ret = this.fetch(executeContext, clz, ids.get(0));
             retList.add(ret);
             return retList;
         }
-
-        java.util.concurrent.ExecutorService executorService = getExecutorService(ids.size());
+        //量大线程池处理
+        ExecutorService executorService = getExecutorService(ids.size());
         List<Future<T>> futureList = new LinkedList<>();
         for (Integer id : ids) {
             ThreadSubCallable callable = new ThreadSubCallable(this, executeContext, clz, id);
@@ -155,10 +181,10 @@ public class GExecutorService {
     }
 
     public <T> T tranTo(ExecuteContext executeContext, Object value, Class<T> clz) throws Exception {
-        return this.tranTo(executeContext, value, clz,null);
+        return this.tranTo(executeContext, value, clz, null);
     }
 
-    public <T> T tranTo(ExecuteContext executeContext, Object value, Class<T> clz,Object attachParam) throws Exception {
+    public <T> T tranTo(ExecuteContext executeContext, Object value, Class<T> clz, Object attachParam) throws Exception {
         if (value == null)
             return null;
         //返回类型不一致(可能是高级的多字段的实体)，用json转一下
@@ -174,9 +200,7 @@ public class GExecutorService {
 
         List<Object> fieldValues = new ArrayList<>();
         if (subSelectFieldList.size() >= 2) {
-            int threadSize = subSelectFieldList.size();
-            threadSize = threadSize >= 8 ? 8 : threadSize;
-            java.util.concurrent.ExecutorService executorService = Executors.newFixedThreadPool(threadSize);
+            ExecutorService executorService = getExecutorService(subSelectFieldList.size());
             List<Future<ExecutorBean>> futureList = new LinkedList<>();
             for (int i = 0; i < subSelectFieldList.size(); i++) {
                 ExecutorBean executorBean = new ExecutorBean();
@@ -201,7 +225,7 @@ public class GExecutorService {
             executorService.shutdown();
         } else {
             Field field = subSelectFieldList.get(0);
-            Object fieldValue = selectFieldValue(executeContext, object, field,attachParam);
+            Object fieldValue = selectFieldValue(executeContext, object, field, attachParam);
             fieldValues.add(fieldValue);
         }
 
@@ -218,8 +242,8 @@ public class GExecutorService {
             }
             if (filterSetValue)
                 continue;
-            if (setField.getType() != fieldValue.getClass()) {
-                fieldValue = tranTo(executeContext, fieldValue, setField.getType());
+            if (setField.getType() != fieldValue.getClass() && !setField.getType().isAssignableFrom(fieldValue.getClass())) {
+                fieldValue = tranTo(executeContext, fieldValue, setField.getType(), attachParam);
             }
             setField.set(object, fieldValue);
         }
@@ -254,6 +278,7 @@ public class GExecutorService {
         return selectByKey(clz, lId);
     }
 
+    @Nullable
     private <T> CoustmerMapperExec getMapperExecerFromClass(Class<T> clazz) throws Exception {
         ExecutableClass executableClass = checkAndGetExecutableClassFromClazz(clazz);
         CoustmerMapperExec execCache = coustmerMapperExecMap.get(clazz);
@@ -304,10 +329,10 @@ public class GExecutorService {
     }
 
     public <T> T fetch(ExecuteContext executeContext, Class<T> clz, Object key) throws Exception {
-        return fetch(executeContext,clz,key,null);
+        return fetch(executeContext, clz, key, null);
     }
 
-    public <T> T fetch(ExecuteContext executeContext, Class<T> clz, Object key,Object attachParam) throws Exception {
+    public <T> T fetch(ExecuteContext executeContext, Class<T> clz, Object key, Object attachParam) throws Exception {
         Object object = null;
         ExecutableClass executableClass = checkAndGetExecutableClassFromClazz(clz);
         Class mapperClz = executableClass.mapperClazz();
@@ -350,9 +375,10 @@ public class GExecutorService {
 
             int redisCacheSaveMinute = executableClass.redisCacheSaveMinute();
             //对数据库原始数据缓存(须在获取关联数据之前)
-            if (redisCacheSaveMinute >= 1) {
-                this.setObject(redisKey, object, redisCacheSaveMinute);
+            if (redisCacheSaveMinute < 0 || redisCacheSaveMinute > MAX_CACHE_SAVE_MINUTE) {
+                redisCacheSaveMinute = MAX_CACHE_SAVE_MINUTE;
             }
+            this.setObject(redisKey, object, redisCacheSaveMinute);
         }
 
         //获取子字段，关联的，可被赋值的
@@ -482,7 +508,7 @@ public class GExecutorService {
      * @return
      * @throws Exception
      */
-    public Integer updateOrInsertTo( Object formObj,  Object toObj,  IEquality iequality) throws Exception {
+    public Integer updateOrInsertTo(@Nullable Object formObj, @NotNull Object toObj, @Nullable IEquality iequality) throws Exception {
         if (toObj == null)
             throw new InvalidParameterException("toObj can't be null");
         if (formObj != null && toObj != null) {
@@ -495,8 +521,20 @@ public class GExecutorService {
 
             if (eq)
                 return 1;//相等，当作是更新成功了，实际上没有更新数据库
-            else
+            else {
+                Object id = this.tryGetBeanId(toObj);
+                if (id == null) {
+                    id = this.tryGetBeanId(formObj);
+                    if (id == null)
+                        return 0;//两个数据都没有id
+
+                    boolean setIdSuccess = this.setBeanId(toObj, id);
+                    if (!setIdSuccess)//设置数据id，用于后续更新
+                        return 0;
+                }
                 return this.update(toObj);
+            }
+
         }
         if (formObj == null && toObj != null) {
             return this.insert(toObj);
@@ -504,7 +542,7 @@ public class GExecutorService {
         return 0;
     }
 
-    public Integer updateOrInsertTo( Object formObj,  Object toObj) throws Exception {
+    public Integer updateOrInsertTo(@Nullable Object formObj, @NotNull Object toObj) throws Exception {
         return updateOrInsertTo(formObj, toObj, null);
     }
 
@@ -564,10 +602,25 @@ public class GExecutorService {
     protected Object tryGetBeanId(Object bean) {
         if (bean == null)
             return null;
+        Field idField = this.getIdField(bean);
+        if (idField == null)
+            return null;
+        try {
+            return idField.get(bean);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private Field getIdField(Object bean) {
+        if (bean == null)
+            return null;
         Class clz = bean.getClass();
         try {
             Field idField = getFieldByClass(clz, "id");
-            return idField.get(bean);
+            if (idField != null)
+                return idField;
         } catch (Exception e) {
         }
 
@@ -576,12 +629,28 @@ public class GExecutorService {
             for (Field execField : fields) {
                 ExecutableField executableField = execField.getAnnotation(ExecutableField.class);
                 if (executableField.isIdField()) {
-                    return execField.get(bean);
+                    execField.setAccessible(true);
+                    return execField;
                 }
             }
         } catch (Exception e) {
         }
         return null;
+    }
+
+    private boolean setBeanId(Object bean, Object id) {
+        if (bean == null || id == null)
+            return false;
+        Field idField = this.getIdField(bean);
+        if (idField == null)
+            return false;
+        try {
+            idField.set(bean, id);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+        return true;
     }
 
 
@@ -601,10 +670,16 @@ public class GExecutorService {
         if (subExecClazz == null)
             return null;
         SubExecIntf subExecIntf = executerCacheMap.get(subExecClazz);
-        if (subExecIntf == null) {
+        if (subExecIntf == null) {//未创建
             subExecIntf = subExecClazz.newInstance();
-            subExecIntf.init(getWebApplicationContext(),this);
+            subExecIntf.init(getWebApplicationContext(), this);
             executerCacheMap.put(subExecClazz, subExecIntf);
+        } else if (!subExecIntf.isLifeCycleFinish()) {//生命周期未完成，新实例
+            if (!(subExecIntf instanceof DefSubExecIntf)) {
+                subExecIntf = subExecClazz.newInstance();
+                subExecIntf.init(getWebApplicationContext(), this);
+                executerCacheMap.put(subExecClazz, subExecIntf);
+            }
         }
         return (T) subExecIntf;
     }
@@ -624,10 +699,8 @@ public class GExecutorService {
             if (subExecIntf == null)
                 return null;
 
-            synchronized (subExecIntf) {//一次查询的生命周期
-                if (subExecIntf.preStartSelect(context, executableField, bean))
-                    return null;
-
+            boolean intercept = subExecIntf.preStartSelect(context, executableField, bean);
+            if (!intercept) {
                 String[] bindFiles = executableField.bindFieldList();
                 if (bindFiles.length > 0) {
                     Object[] params = new Object[bindFiles.length];
@@ -640,16 +713,21 @@ public class GExecutorService {
                     }
                     fieldValue = subExecIntf.onSubSelectMore(context, execField.getType(), params, attachParam);
                 } else {
-                    Field bindIdField = getFieldByClass(beanClazz, executableField.bindFieldName());
-                    if (bindIdField == null)
-                        throw new NullPointerException("can't find idField (" + executableField.bindFieldName() + ") in  class : " + beanClazz.getName());
-                    paramter = bindIdField.get(bean);
+                    String bindField = executableField.bindFieldName();
+                    if (bindField.isEmpty()) {
+                        paramter = bean;
+                    } else {
+                        Field bindIdField = getFieldByClass(beanClazz, executableField.bindFieldName());
+                        if (bindIdField == null)
+                            throw new NullPointerException("can't find idField (" + executableField.bindFieldName() + ") in  class : " + beanClazz.getName());
+                        paramter = bindIdField.get(bean);
+                    }
 
                     fieldValue = subExecIntf.onSubSelect(context, execField.getType(), paramter, attachParam);
                 }
 
-                subExecIntf.finishSelect(context,executableField,bean,fieldValue);
-            }//end synchronized
+            }
+            subExecIntf.finishSelect(context, executableField, bean, fieldValue);
 
         }
 
@@ -667,6 +745,7 @@ public class GExecutorService {
         System.out.println("DBExecutorService destory!!!");
     }
 
+    @Autowired
     private WebApplicationContext mWebApplicationContext;
 
     private WebApplicationContext getWebApplicationContext() {
